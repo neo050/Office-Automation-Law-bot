@@ -92,13 +92,15 @@ export async function agentHandle(waMsg) {
 
         try {
           switch (tc.function.name) {
-            case 'lookupClient':
+            case 'lookupClient':{
               result = await lookupClient(argsIn);
               break;
+            }
 
-            case 'createFolder':
+            case 'createFolder':{
               result = await createFolder(argsIn);
               break;
+            }
 
             case 'saveMedia': {
               const { folderId } = argsIn;
@@ -124,14 +126,16 @@ export async function agentHandle(waMsg) {
               break;
             }
 
-            case 'sendWhatsApp':
+            case 'sendWhatsApp':{
               await sendWhatsApp({ ...argsIn, to: waMsg.from });
               result = { ok:true };
               break;
+            }
 
-            case 'saveChatLog':
+            case 'saveChatLog':{
               result = await saveChatLog(argsIn);
               break;
+            }
 
             default:
               result = { ok:false, error:'unknown_tool' };

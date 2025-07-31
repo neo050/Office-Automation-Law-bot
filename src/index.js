@@ -1,8 +1,9 @@
 // src/index.js
 import 'dotenv/config';
+import { log } from './logger.js';
 
 const role = process.env.RUN_ROLE || 'webhook';
-console.log('▶ starting role:', role);
+log.debug('▶ starting role:', role);
 
 try {
   if (role === 'webhook') {
@@ -13,6 +14,6 @@ try {
     throw new Error(`Unknown RUN_ROLE "${role}"`);
   }
 } catch (err) {
-  console.error('[boot] fatal:', err.message);
+  log.error('[boot] fatal:', err.message);
   process.exit(1);
 }

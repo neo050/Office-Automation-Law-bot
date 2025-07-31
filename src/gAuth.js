@@ -17,7 +17,7 @@ oAuth2.setCredentials(token);
 /* auto‑refresh (שומר קובץ בכל חידוש) */
 oAuth2.on('tokens', async t => {
   const merged = { ...token, ...t };
-  await fs.writeFile('config/token.json', JSON.stringify(merged, null, 2));
+  await fs.writeFile('token.json', JSON.stringify(merged, null, 2));
   console.log('[OAuth] token refreshed & saved');
 });
 

@@ -6,6 +6,7 @@ import 'dotenv/config';
 import express from 'express';
 import { agentHandle } from './agentLoop.js';
 import { queueInboundMedia } from './linkScheduler.js';
+import { log } from './logger.js';
 
 const app = express();
 app.use(express.json({ limit:'2mb' }));
@@ -23,7 +24,9 @@ app.post('/webhook', async (req, res) => {
     const value   = req.body.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
     if (message) {
+      log.debug("webhookServer.app.post('/webhook')-> queueInboundMedia(message)", message);
       await queueInboundMedia(message); // ✔ loss‑free
+      log.debug("webhookServer.app.post('/webhook')-> agentHandle(message)", message);
       await agentHandle(message);
     }
   } catch (err) {
