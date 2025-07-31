@@ -1,4 +1,4 @@
-# 📁  Law‑Demo‑Bot
+# 📁  Law‑Bot
 
 Conversational intake assistant for a boutique Israeli law firm – built as a **cloud‑native, event‑driven micro‑service** that fuses **WhatsApp Business Cloud API**, **OpenAI GPT‑4o**, and **Google Workspace** into one seamless workflow.
 
