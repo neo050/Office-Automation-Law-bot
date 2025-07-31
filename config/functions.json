@@ -1,0 +1,7 @@
+[
+  {"type":"function","function":{"name":"lookupClient","description":"Check if a client already exists...","parameters":{"type":"object","properties":{"id":{"type":"string"},"fullName":{"type":"string","nullable":true},"phone":{"type":"string","nullable":true}},"required":["id"]}}},
+  {"type":"function","function":{"name":"createFolder","description":"Create a new Google Drive folder...","parameters":{"type":"object","properties":{"id":{"type":"string"},"fullName":{"type":"string"},"phone":{"type":"string","nullable":true}},"required":["id","fullName"]}}},
+  {"type":"function","function":{"name":"saveMedia","description":"Download WA media and save to Drive","parameters":{"type":"object","properties":{"folderId":{"type":"string"},"mediaId":{"type":"string"},"mediaType":{"type":"string","enum":["image","audio","document","video","sticker"]}},"required":["folderId","mediaId","mediaType"]}}},
+  {"type":"function","function":{"name":"sendWhatsApp","description":"Send WA message","parameters":{"type":"object","properties":{"to":{"type":"string"},"text":{"type":"string","nullable":true},"templateName":{"type":"string","nullable":true}},"required":["to"]}}},
+  {"type":"function","function":{"name":"saveChatLog","description":"Save transcript to Drive","parameters":{"type":"object","properties":{"folderId":{"type":"string"},"log":{"type":"string"}},"required":["folderId","log"]}}}
+]

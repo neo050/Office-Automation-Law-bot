@@ -1,0 +1,51 @@
+# docker‑compose.yml  — production stack
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${REDIS_PASS}"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
+      interval: 5s
+      retries: 3
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+
+  webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile       # אותו Dockerfile ל‑2 השירותים
+    env_file: .env
+    environment:
+      - RUN_ROLE=webhook           # ↙︎ index.js מפעיל webhookServer
+      - REDIS_HOST=redis
+      - REDIS_PASS=${REDIS_PASS}
+    ports:
+      - "8197:8197"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - RUN_ROLE=poller            # ↙︎ index.js מפעיל linkPoller
+      - REDIS_HOST=redis
+      - REDIS_PASS=${REDIS_PASS}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:
