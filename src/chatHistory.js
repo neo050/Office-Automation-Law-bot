@@ -1,4 +1,12 @@
-/** Ensure system prompt is first. */
+// ────────────────────────────────────────────────────────────────
+//  src/chatHistory.js   ·   Production build  (v2025-08-02)
+//  Utilities for manipulating GPT conversation history + Redis helpers
+// ────────────────────────────────────────────────────────────────
+
+import redis       from './redis.js';
+import { log }     from './logger.js';
+
+/* ─────────────────────  System‑prompt handling  ───────────────────── */
 export function ensureSystemPrompt(history, prompt) {
   if (!history.length || history[0].role !== 'system') {
     return [{ role: 'system', content: prompt }, ...history];
@@ -6,7 +14,7 @@ export function ensureSystemPrompt(history, prompt) {
   return history;
 }
 
-/** Sanitize history for OpenAI (no null content, tool content is string). */
+/* ─────────────────────  Sanitise for OpenAI  ───────────────────── */
 export function sanitizeForOpenAI(history) {
   return history.map(m => {
     const msg = { ...m };
@@ -20,24 +28,20 @@ export function sanitizeForOpenAI(history) {
   });
 }
 
-/**
- * Repair OpenAI chat history so it's valid:
- * - Assistant with tool_calls must be followed by matching tool messages.
- * - Orphan tools/messages are dropped.
- */
+/* ─────────────────────  Repair history structure  ───────────────────── */
 export function repairHistory(history) {
   const cleaned = [];
   const report  = { dropped: 0, fixed: 0, orphanTools: 0, removedToolCalls: 0 };
 
-  const pending = []; // stack of assistant msgs awaiting tools
-  const clone = o => JSON.parse(JSON.stringify(o));
+  const pending = []; // assistant msgs awaiting tools
+  const clone   = o => JSON.parse(JSON.stringify(o));
 
   for (const msg of history) {
     if (!msg || !msg.role) { report.dropped++; continue; }
 
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
-      const a = clone(msg);
-      const ids = new Set(a.tool_calls.map(tc => tc.id).filter(Boolean));
+      const a         = clone(msg);
+      const ids       = new Set(a.tool_calls.map(tc => tc.id).filter(Boolean));
       const responded = new Set();
       pending.push({ idx: cleaned.length, ids, responded });
       cleaned.push(a);
@@ -60,7 +64,7 @@ export function repairHistory(history) {
     cleaned.push(clone(msg));
   }
 
-  // remove unresolved ids
+  // strip unresolved tool_calls
   for (const frame of pending) {
     const unresolved = [...frame.ids].filter(id => !frame.responded.has(id));
     if (!unresolved.length) continue;
@@ -76,3 +80,45 @@ export function repairHistory(history) {
 
   return { history: cleaned, report };
 }
+
+/* ─────────────────────  NEW  ↴  Redis helpers  ───────────────────── */
+
+/**
+ * Build a plain‑text transcript string from Redis key.
+ * @param {string} convKey – e.g. "conv:+972501234567"
+ * @returns {string}
+ */
+export async function buildLogFromRedis(convKey) {
+  log.step('chatHistory.buildLogFromRedis', 'start', { convKey });
+  try {
+    const raw = await redis.get(convKey);
+    if (!raw) return '';
+
+    const arr = JSON.parse(raw);
+    const txt = arr
+      .filter(m => m.role === 'assistant' || m.role === 'user')
+      .map(m => `[${m.role}] ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+      .join(' / ');
+
+    log.step('chatHistory.buildLogFromRedis', 'done', { len: txt.length });
+    return txt;
+  } catch (e) {
+    log.error('chatHistory.buildLogFromRedis', 'failed', e);
+    return '';
+  }
+}
+
+/**
+ * Optionally clear history after persist to keep Redis clean.
+ */
+export async function clearHistory(convKey) {
+  try { await redis.del(convKey); } catch {/* ignore */}
+}
+
+export default {
+  ensureSystemPrompt,
+  sanitizeForOpenAI,
+  repairHistory,
+  buildLogFromRedis,
+  clearHistory
+};

@@ -1,21 +1,29 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// agentLoop.js   ·   GPT worker  (31‑Jul‑25)
-// ─────────────────────────────────────────────────────────────────────────────
-import fs           from 'node:fs';
-import { OpenAI }   from 'openai';
-import redis        from './redis.js';
-import fns          from './functionsImpl.js';
+// ────────────────────────────────────────────────────────────────
+//  src/agentLoop.js   ·   GPT worker  (v2025-08-02, prod)
+//  Responsibilities:
+//   • Receive WA webhook message, maintain convo history in Redis.
+//   • Orchestrate GPT calls + tool calls.
+//   • Queue inbound media, schedule Drive link, bump idle timer.
+//   • Persist history (TTL 3 d).
+//  Dependencies: redis, openai, functionsImpl (prod), idleManager.
+// ────────────────────────────────────────────────────────────────
+
+import fs              from 'node:fs';
+import { OpenAI }       from 'openai';
+import redis            from './redis.js';
+import fns              from './functionsImpl.js';
 import {
   repairHistory,
   ensureSystemPrompt,
   sanitizeForOpenAI
-} from './chatHistory.js';
+}                       from './chatHistory.js';
 import {
   queueInboundMedia,
   popNextMedia,
   scheduleFolderLink
-} from './linkScheduler.js';
-import { log }      from './logger.js';
+}                       from './linkScheduler.js';
+import { bump as idleBump } from './idleManager.js';
+import { log }          from './logger.js';
 
 /* ─────────────── Short‑hands ─────────────── */
 const {
@@ -23,13 +31,15 @@ const {
   createFolder,
   saveMedia,
   sendWhatsApp,
-  saveChatLog
+  saveChatBundleUpdate // ← legacy saveChatLog points here
 } = fns;
+
+/* ─────────────── OpenAI ─────────────── */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ─────────────── GPT settings ─────────────── */
-const TOOLS = JSON.parse(fs.readFileSync('config/functions.json','utf8'));
-const FALLBACK_MSG = 'מצטערים, נתקלנו בתקלה טכנית זמנית. אנא נסו שוב.';  
+const TOOLS         = JSON.parse(fs.readFileSync('config/functions.json', 'utf8'));
+const FALLBACK_MSG  = 'מצטערים, נתקלנו בתקלה טכנית זמנית. אנא נסו שוב.';
 
 const SYSTEM_PROMPT = `
 אתה Legal‑Intake‑Agent במשרד עורכת‑הדין עדן חגג.
@@ -42,23 +52,25 @@ const SYSTEM_PROMPT = `
 3. אם לא קיים ➜ בקש פרטים, צור תיקייה, עדכן גיליון.
 4. בקש והעלה מסמכים חסרים (saveMedia לכל קובץ).
 5. אין לשלוח קישור Drive פרטני. קישור מרוכז יישלח אוטומטית לאחר שהמערכת זיהתה שהעלאות הסתיימו.
-6. בסיום הפעל saveChatLog בפורמט "[bot] … / [user] …".
+6. בסיום הפעל saveChatLog בפורמט "[bot] … / [user] …" (שמירת לוג היום מתקיימת ע״י השרת).
+7. אם הועלה הקובץ האחרון או חלפו 6 דקות ללא פעילות – השרת ישמור לוג אוטומטית; אין צורך לקרוא ידנית.
 כל התשובות בעברית רשמית ותמציתית.
 `;
 
 /* ───────────────────────── Main handler ───────────────────────── */
 export async function agentHandle(waMsg) {
-  /* ① שומר מדיה בתור (כולל דדופ שכבר נמצא ב‑linkScheduler) */
+  /* ① inbound media to FIFO */
   await queueInboundMedia(waMsg);
 
   const convKey = `conv:${waMsg.from}`;
-  log.step('agentHandle','start',{ from:waMsg.from, type:waMsg.type });
+  log.step('agentHandle', 'start', { from: waMsg.from, type: waMsg.type });
 
+  /* ② build / load history */
   let history = JSON.parse((await redis.get(convKey)) || '[]');
   history     = ensureSystemPrompt(history, SYSTEM_PROMPT);
-  history.push({ role:'user', content: waMsg.text?.body ?? `[${waMsg.type}]` });
+  history.push({ role: 'user', content: waMsg.text?.body ?? `[${waMsg.type}]` });
 
-  /* ② לולאת GPT • tool‑calls */
+  /* ③ GPT loop (may recurse via tool-calls) */
   while (true) {
     const { history: safe } = repairHistory(history);
     const messages = sanitizeForOpenAI(safe);
@@ -72,77 +84,73 @@ export async function agentHandle(waMsg) {
         tool_choice: 'auto'
       });
     } catch (err) {
-      log.error('agentHandle','OpenAI error', err);
+      log.error('agentHandle', 'openai_failed', err);
       await sendWhatsApp({ to: waMsg.from, text: FALLBACK_MSG });
       return;
     }
 
     const msg = oa.choices[0].message;
 
-    /* ---------- Tool calls ---------- */
+    /* ---------- Tool‑calls ---------- */
     if (msg.tool_calls) {
       history.push({ ...msg, content: msg.content ?? '' });
 
       const toolReplies = [];
-      let hadError = false, tokenExpired = false;
+      let   hadError    = false,
+            tokenExpired = false;
 
       for (const tc of msg.tool_calls) {
         const argsIn = JSON.parse(tc.function.arguments || '{}');
-        let result;
+        let   result;
 
         try {
           switch (tc.function.name) {
-            case 'lookupClient':{
+            case 'lookupClient': {
               result = await lookupClient(argsIn);
               break;
             }
-
-            case 'createFolder':{
+            case 'createFolder': {
               result = await createFolder(argsIn);
+              if (result.ok) idleBump(waMsg.from, result.folderId);
               break;
             }
-
             case 'saveMedia': {
-              const { folderId } = argsIn;
-              let   { mediaId, mediaType } = argsIn;
+              let { folderId, mediaId, mediaType } = argsIn;
 
+              // fallback to queued media
               if (!mediaId || !mediaType || !/^\d+$/.test(mediaId)) {
                 const next = await popNextMedia(waMsg.from);
                 if (next) ({ id: mediaId, type: mediaType } = next);
               }
 
               if (!mediaId || !mediaType) {
-                result = { ok:false, error:'no_media_in_queue' };
+                result = { ok: false, error: 'no_media_in_queue' };
               } else {
-                /* actual upload */
                 result = await saveMedia({ folderId, mediaId, mediaType });
                 if (result.ok) {
-                  /* ③ קבע תזמון לינק */
                   await scheduleFolderLink(waMsg.from, folderId);
-                  /* אל תדליף URL ל‑GPT */
-                  result = { ok:true };
+                  idleBump(waMsg.from, folderId);
+                  result = { ok: true }; // strip URL
                 }
               }
               break;
             }
-
-            case 'sendWhatsApp':{
+            case 'sendWhatsApp': {
               await sendWhatsApp({ ...argsIn, to: waMsg.from });
-              result = { ok:true };
+              result = { ok: true };
               break;
             }
-
-            case 'saveChatLog':{
-              result = await saveChatLog(argsIn);
+            case 'saveChatLog': {
+              // deprecated – keep for backward‑compat; route to bundle‑update
+              result = await saveChatBundleUpdate(argsIn);
               break;
             }
-
             default:
-              result = { ok:false, error:'unknown_tool' };
+              result = { ok: false, error: 'unknown_tool' };
           }
         } catch (err) {
-          log.error('agentHandle',`tool ${tc.function.name} failed`,err);
-          result = { ok:false, error: err.message || 'tool_failed' };
+          log.error('agentHandle', `tool_${tc.function.name}_failed`, err);
+          result = { ok: false, error: err.message || 'tool_failed' };
         }
 
         if (!result.ok) {
@@ -151,7 +159,7 @@ export async function agentHandle(waMsg) {
         }
 
         toolReplies.push({
-          role:'tool',
+          role: 'tool',
           tool_call_id: tc.id,
           content: JSON.stringify(result)
         });
@@ -161,26 +169,26 @@ export async function agentHandle(waMsg) {
 
       if (hadError) {
         const txt = tokenExpired
-          ? 'הטוקן שלנו לוואטסאפ פג תוקף, אנו מעדכנים וחוזרים אליך.'
+          ? 'הטוקן שלנו לוואטסאפ פג תוקף – אנו מעדכנים וחוזרים אליך.'
           : FALLBACK_MSG;
         await sendWhatsApp({ to: waMsg.from, text: txt });
-        history.push({ role:'assistant', content: txt });
+        history.push({ role: 'assistant', content: txt });
         break;
       }
 
-      /* ↻ back to GPT */
+      // ↻ continue loop (let GPT inspect tool results)
       continue;
     }
 
-    /* ---------- Assistant message ---------- */
+    /* ---------- Assistant plain‑text ---------- */
     if (msg.content) {
       await sendWhatsApp({ to: waMsg.from, text: msg.content });
-      history.push({ role:'assistant', content: msg.content });
+      history.push({ role: 'assistant', content: msg.content });
     }
     break;
   }
 
-  /* persist */
-  await redis.set(convKey, JSON.stringify(history), 'EX', 60*60*24*3);
-  log.step('agentHandle','end',{ convKey });
+  /* ④ persist convo */
+  await redis.set(convKey, JSON.stringify(history), 'EX', 60 * 60 * 24 * 3);
+  log.step('agentHandle', 'end', { convKey });
 }

@@ -4,31 +4,26 @@
   "description": "WhatsApp → GPT‑4o legal‑intake bot",
   "type": "module",
   "main": "src/index.js",
-
   "scripts": {
     "dev": "nodemon --exec node src/index.js",
     "start": "node src/index.js",
-
     "start:webhook": "RUN_ROLE=webhook node src/index.js",
-    "start:poller":  "RUN_ROLE=poller  node src/index.js"
+    "start:poller": "RUN_ROLE=poller  node src/index.js"
   },
-
   "dependencies": {
     "axios": "^1.6.8",
+    "dayjs": "^1.11.13",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "googleapis": "^154.0.0",
     "ioredis": "^5.6.1",
     "openai": "^4.104.0"
   },
-
   "devDependencies": {
     "nodemon": "^3.1.10"
   },
-
   "engines": {
     "node": ">=20.0.0"
   },
-
   "license": "UNLICENSED"
 }
