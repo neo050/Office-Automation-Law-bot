@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-# 📁  Law‑Bot
-=======
 # 📁  Law‑Demo‑Bot – August 2025 Edition
->>>>>>> ae3fd94 (feat(intake-v2): idle summary pipeline, append-update logs & README refresh)
 
 Conversational intake assistant for a boutique Israeli law firm – built as a **cloud‑native, event‑driven micro‑service** that fuses **WhatsApp Business Cloud API**, **OpenAI GPT‑4o**, and **Google Workspace** into one seamless workflow.
 
