@@ -19,20 +19,47 @@ app.get('/webhook', (req, res) => {
   res.sendStatus(403);
 });
 
+// ───────────────────────────────────────────────
+// POST /webhook  – Meta callback (messages + statuses)
+// ───────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
+  const t0 = Date.now();                                           // מטריצת זמן לבנצ'מרק
+
   try {
-    const value   = req.body.entry?.[0]?.changes?.[0]?.value;
-    const message = value?.messages?.[0];
+    /* ① חילוץ הערך הרלוונטי מה-payload */
+    const value    = req.body.entry?.[0]?.changes?.[0]?.value;
+    const message  = value?.messages?.[0];        // הודעת טקסט / מדיה
+    const statuses = value?.statuses;             // delivered / read / failed
+
+    /* ② Echo & Status filtering */
+    const MY_WABA = process.env.WHATSAPP_BUSINESS_NUMBER; // "972797290682"
+
+    if (message?.from === MY_WABA) {
+      log.debug('webhook', 'echo_skip', { from: message.from });
+      return res.sendStatus(200);
+    }
+
+    if (statuses?.length) {
+      log.debug('webhook', 'status_skip', { statuses });
+      return res.sendStatus(200);
+    }
+
+    /* ③ עיבוד הודעה אמיתית */
     if (message) {
-      log.debug("webhookServer.app.post('/webhook')-> queueInboundMedia(message)", message);
-      await queueInboundMedia(message); // ✔ loss‑free
-      log.debug("webhookServer.app.post('/webhook')-> agentHandle(message)", message);
+      log.step('webhook', 'queueInboundMedia.start', { from: message.from, type: message.type });
+      await queueInboundMedia(message);
+
+      log.step('webhook', 'agentHandle.start', { from: message.from, type: message.type });
       await agentHandle(message);
     }
   } catch (err) {
-    console.error('[webhook] handler failed', err);
+    log.error('webhook', 'handler_failed', err);
+    // חזרה 200 גם במקרה של שגיאה כדי למנוע re-delivery אינסופי ממטא
   }
+
+  /* ④ סיום */
   res.sendStatus(200);
+  log.info('webhook', 'done', { ms: Date.now() - t0 });
 });
 
 const PORT = process.env.PORT || 8197;

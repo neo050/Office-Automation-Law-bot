@@ -1,45 +1,58 @@
 // ────────────────────────────────────────────────────────────────
-//  src/agentLoop.js   ·   GPT worker  (v2025-08-02, prod)
-//  Responsibilities:
-//   • Receive WA webhook message, maintain convo history in Redis.
-//   • Orchestrate GPT calls + tool calls.
-//   • Queue inbound media, schedule Drive link, bump idle timer.
-//   • Persist history (TTL 3 d).
-//  Dependencies: redis, openai, functionsImpl (prod), idleManager.
+//  src/agentLoop.js   ·   GPT worker  (v2025-08-03, prod)
 // ────────────────────────────────────────────────────────────────
-
-import fs              from 'node:fs';
-import { OpenAI }       from 'openai';
-import redis            from './redis.js';
-import fns              from './functionsImpl.js';
+import fs          from 'node:fs';
+import { OpenAI }   from 'openai';
+import redis        from './redis.js';
+import fns          from './functionsImpl.js';
 import {
   repairHistory,
   ensureSystemPrompt,
   sanitizeForOpenAI
-}                       from './chatHistory.js';
+}                   from './chatHistory.js';
 import {
   queueInboundMedia,
   popNextMedia,
   scheduleFolderLink
-}                       from './linkScheduler.js';
+}                   from './linkScheduler.js';
 import { bump as idleBump } from './idleManager.js';
-import { log }          from './logger.js';
+import { log }      from './logger.js';
 
-/* ─────────────── Short‑hands ─────────────── */
+/* ─────────────── Short-hands ─────────────── */
 const {
   lookupClient,
   createFolder,
   saveMedia,
-  sendWhatsApp,
-  saveChatBundleUpdate // ← legacy saveChatLog points here
+  sendWhatsApp,          // raw (single attempt)
+  saveChatBundleUpdate
 } = fns;
 
 /* ─────────────── OpenAI ─────────────── */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/* ─────────────── Helper: retry w/ backoff ─────────────── */
+async function sendWhatsAppSafe (args) {
+  const DELAYS = [0, 500, 1000, 2000];          // ms; 1st = immediate
+  for (let i = 0; i < DELAYS.length; i++) {
+    if (DELAYS[i]) await new Promise(r => setTimeout(r, DELAYS[i]));
+    const res = await sendWhatsApp(args);
+    if (res.ok) return res;
+
+    log.error('sendWhatsAppSafe', 'retry_attempt', {
+      to     : args.to,
+      attempt: i,
+      err    : res.error
+    });
+    /* break early on non-network errors */
+    if (!['ETIMEDOUT', 'ENETUNREACH', 'token_expired'].includes(res.error)) break;
+  }
+  log.error('sendWhatsAppSafe', 'retry_giveup', { to: args.to });
+  return { ok:false, error:'give_up' };
+}
+
 /* ─────────────── GPT settings ─────────────── */
-const TOOLS         = JSON.parse(fs.readFileSync('config/functions.json', 'utf8'));
-const FALLBACK_MSG  = 'מצטערים, נתקלנו בתקלה טכנית זמנית. אנא נסו שוב.';
+const TOOLS        = JSON.parse(fs.readFileSync('config/functions.json', 'utf8'));
+const FALLBACK_MSG = 'מצטערים, נתקלנו בתקלה טכנית זמנית. אנא נסו שוב.';
 
 const SYSTEM_PROMPT = `
 אתה Legal‑Intake‑Agent במשרד עורכת‑הדין עדן חגג.
@@ -57,23 +70,23 @@ const SYSTEM_PROMPT = `
 כל התשובות בעברית רשמית ותמציתית.
 `;
 
+
 /* ───────────────────────── Main handler ───────────────────────── */
-export async function agentHandle(waMsg) {
-  /* ① inbound media to FIFO */
+export async function agentHandle (waMsg) {
   await queueInboundMedia(waMsg);
 
   const convKey = `conv:${waMsg.from}`;
   log.step('agentHandle', 'start', { from: waMsg.from, type: waMsg.type });
 
-  /* ② build / load history */
+  /* build history */
   let history = JSON.parse((await redis.get(convKey)) || '[]');
   history     = ensureSystemPrompt(history, SYSTEM_PROMPT);
-  history.push({ role: 'user', content: waMsg.text?.body ?? `[${waMsg.type}]` });
+  history.push({ role:'user', content: waMsg.text?.body ?? `[${waMsg.type}]` });
 
-  /* ③ GPT loop (may recurse via tool-calls) */
+  /* GPT loop */
   while (true) {
     const { history: safe } = repairHistory(history);
-    const messages = sanitizeForOpenAI(safe);
+    const messages          = sanitizeForOpenAI(safe);
 
     let oa;
     try {
@@ -85,19 +98,20 @@ export async function agentHandle(waMsg) {
       });
     } catch (err) {
       log.error('agentHandle', 'openai_failed', err);
-      await sendWhatsApp({ to: waMsg.from, text: FALLBACK_MSG });
+      await sendWhatsAppSafe({ to: waMsg.from, text: FALLBACK_MSG });
       return;
     }
 
     const msg = oa.choices[0].message;
 
-    /* ---------- Tool‑calls ---------- */
+    /* ---------- Tool-calls ---------- */
     if (msg.tool_calls) {
       history.push({ ...msg, content: msg.content ?? '' });
 
-      const toolReplies = [];
-      let   hadError    = false,
-            tokenExpired = false;
+      const toolReplies      = [];
+      let   hadError         = false,
+            tokenExpired     = false;
+      const sentTexts        = new Set();      // ← dedup key
 
       for (const tc of msg.tool_calls) {
         const argsIn = JSON.parse(tc.function.arguments || '{}');
@@ -105,52 +119,56 @@ export async function agentHandle(waMsg) {
 
         try {
           switch (tc.function.name) {
-            case 'lookupClient': {
-              result = await lookupClient(argsIn);
-              break;
-            }
-            case 'createFolder': {
+            case 'lookupClient':  result = await lookupClient(argsIn);  break;
+
+            case 'createFolder':
               result = await createFolder(argsIn);
               if (result.ok) idleBump(waMsg.from, result.folderId);
               break;
-            }
+
             case 'saveMedia': {
               let { folderId, mediaId, mediaType } = argsIn;
 
-              // fallback to queued media
               if (!mediaId || !mediaType || !/^\d+$/.test(mediaId)) {
                 const next = await popNextMedia(waMsg.from);
                 if (next) ({ id: mediaId, type: mediaType } = next);
               }
 
               if (!mediaId || !mediaType) {
-                result = { ok: false, error: 'no_media_in_queue' };
+                result = { ok:false, error:'no_media_in_queue' };
               } else {
                 result = await saveMedia({ folderId, mediaId, mediaType });
                 if (result.ok) {
                   await scheduleFolderLink(waMsg.from, folderId);
                   idleBump(waMsg.from, folderId);
-                  result = { ok: true }; // strip URL
+                  result = { ok:true };
                 }
               }
               break;
             }
+
             case 'sendWhatsApp': {
-              await sendWhatsApp({ ...argsIn, to: waMsg.from });
-              result = { ok: true };
+              const dedupKey = argsIn.text ?? `tpl:${argsIn.templateName}`;
+              if (sentTexts.has(dedupKey)) {
+                log.debug('agentHandle', 'dedup_skip', { to: waMsg.from, key: dedupKey });
+                result = { ok:true, skipped:true };
+              } else {
+                sentTexts.add(dedupKey);
+                result = await sendWhatsAppSafe({ ...argsIn, to: waMsg.from });
+              }
               break;
             }
-            case 'saveChatLog': {
-              // deprecated – keep for backward‑compat; route to bundle‑update
+
+            case 'saveChatLog':   // legacy
               result = await saveChatBundleUpdate(argsIn);
               break;
-            }
+
             default:
-              result = { ok: false, error: 'unknown_tool' };
+              result = { ok:false, error:'unknown_tool' };
           }
         } catch (err) {
           log.error('agentHandle', `tool_${tc.function.name}_failed`, err);
-          result = { ok: false, error: err.message || 'tool_failed' };
+          result = { ok:false, error: err.message || 'tool_failed' };
         }
 
         if (!result.ok) {
@@ -159,7 +177,7 @@ export async function agentHandle(waMsg) {
         }
 
         toolReplies.push({
-          role: 'tool',
+          role:'tool',
           tool_call_id: tc.id,
           content: JSON.stringify(result)
         });
@@ -171,24 +189,23 @@ export async function agentHandle(waMsg) {
         const txt = tokenExpired
           ? 'הטוקן שלנו לוואטסאפ פג תוקף – אנו מעדכנים וחוזרים אליך.'
           : FALLBACK_MSG;
-        await sendWhatsApp({ to: waMsg.from, text: txt });
-        history.push({ role: 'assistant', content: txt });
+        await sendWhatsAppSafe({ to: waMsg.from, text: txt });
+        history.push({ role:'assistant', content: txt });
         break;
       }
 
-      // ↻ continue loop (let GPT inspect tool results)
-      continue;
+      continue;   // back to GPT
     }
 
-    /* ---------- Assistant plain‑text ---------- */
+    /* ---------- Assistant plain-text ---------- */
     if (msg.content) {
-      await sendWhatsApp({ to: waMsg.from, text: msg.content });
-      history.push({ role: 'assistant', content: msg.content });
+      await sendWhatsAppSafe({ to: waMsg.from, text: msg.content });
+      history.push({ role:'assistant', content: msg.content });
     }
     break;
   }
 
-  /* ④ persist convo */
+  /* persist */
   await redis.set(convKey, JSON.stringify(history), 'EX', 60 * 60 * 24 * 3);
   log.step('agentHandle', 'end', { convKey });
 }
