@@ -1,0 +1,43 @@
+flowchart TD
+  A["Meta Webhook<br/>POST /webhook"] -->|1. message| B[webhookServer]
+
+  subgraph "Webhook Layer"
+    B --> C{"סינון ראשוני<br/>statuses / placeholders"}
+    C -->|skip| X["200 OK ← Meta"]
+    C -->|message| D[queueInboundMedia]:::redis
+    C -->|message| E[agentHandle]:::agent
+  end
+
+  subgraph "GPT Agent"
+    E --> F[Redis GET convo]
+    F --> G[add user msg +<br/>ensureSystemPrompt]
+    G --> H([OpenAI chat<br/>+ tool selection]):::openai
+    H -->|tool_calls| I{Router}
+    I -->|lookupClient| J["Google Sheet<br/>upsertClientRow"]:::gs
+    I -->|createFolder| K["Drive ensureFolder"]:::drive
+    I -->|saveMedia| L["saveWhatsApp + Drive upload"]:::drive
+    I -->|sendWhatsApp| M["send via Graph API"]:::wa
+    I -->|scheduleFolderLink| N["Redis Z_DUE<br/>& H_DIR"]:::redis
+    I -->|saveChatBundleUpdate| O["Drive chat.txt + summary.txt"]:::drive
+    I --> P["tool replies → history"]
+    P -->|loop| H
+    H -->|assistant text| M
+    M --> Q["Redis SET convo<br/>+ idleBump"]
+  end
+
+  subgraph "Background services"
+    N ==>|due link| R["linkPoller (infinite loop)"]
+    R -->|getDuePhones| S["Redis Z_DUE"]:::redis
+    R -->|consumePhone| T["Redis H_DIR & Z_DUE"]:::redis
+    R --> U["buildLogFromRedis"]:::redis
+    U --> V["summarizeTranscript (OpenAI)"]:::openai
+    V --> W["saveChatBundleUpdate"]:::drive
+    W --> X1["sendWhatsApp - Drive link"]:::wa
+  end
+
+  classDef redis fill:#ffd,stroke:#c90
+  classDef agent fill:#cdf,stroke:#06f
+  classDef openai fill:#e5eaff,stroke:#2a4bff
+  classDef drive fill:#d0ffd0,stroke:#189a18
+  classDef gs fill:#fff0d0,stroke:#e69500
+  classDef wa fill:#d0f0ff,stroke:#0094c5

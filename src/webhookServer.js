@@ -19,6 +19,8 @@ app.get('/webhook', (req, res) => {
   res.sendStatus(403);
 });
 
+const DROP_TYPES = ['unsupported', 'reaction', 'location'];
+
 // ───────────────────────────────────────────────
 // POST /webhook  – Meta callback (messages + statuses)
 // ───────────────────────────────────────────────
@@ -43,7 +45,10 @@ app.post('/webhook', async (req, res) => {
       log.debug('webhook', 'status_skip', { statuses });
       return res.sendStatus(200);
     }
-
+    if (message && DROP_TYPES.includes(message.type)) {
+        log.info('webhook', 'drop_placeholder', { from: message.from, type: message.type });
+        return res.sendStatus(200);          // ✨ לא נכנס ל-agentLoop
+    }
     /* ③ עיבוד הודעה אמיתית */
     if (message) {
       log.step('webhook', 'queueInboundMedia.start', { from: message.from, type: message.type });
