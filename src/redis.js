@@ -1,4 +1,4 @@
-// src/lib/redis.js   (דוגמה)
+// src/lib/redis.js   
 import Redis from 'ioredis';
 export default new Redis({
 host:     process.env.REDIS_HOST || '127.0.0.1',

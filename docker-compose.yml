@@ -1,51 +1,78 @@
-# docker‑compose.yml  — production stack
-version: "3.8"
+
 
 services:
   redis:
     image: redis:7-alpine
-    command:
-      - redis-server
-      - "--appendonly"
-      - "yes"
-      - "--requirepass"
-      - "${REDIS_PASS}"
+    command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASS}"]
+    ports: ["6379:6379"]
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
       interval: 5s
       retries: 3
-    volumes:
-      - redis-data:/data
-    ports:
-      - "6379:6379"
+    restart: unless-stopped  # Auto-restart for resilience
 
   webhook:
-    build:
-      context: .
-      dockerfile: Dockerfile       # אותו Dockerfile ל‑2 השירותים
+    build: .
     env_file: .env
     environment:
-      - RUN_ROLE=webhook           # ↙︎ index.js מפעיל webhookServer
+      - RUN_ROLE=webhook
       - REDIS_HOST=redis
       - REDIS_PASS=${REDIS_PASS}
-    ports:
-      - "8197:8197"
+      # Logger timezone (your logger should read LOG_TZ). Dockerfile already sets TZ.
+      - LOG_TZ=Asia/Jerusalem
+      # 0=silent, 1=errors, 2=info, 3=debug
+      - DEBUG_LEVEL=${DEBUG_LEVEL:-2}
+    # Expose locally; ngrok will still tunnel to "webhook:8197" inside the network
+    ports: ["8197:8197"]
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      # OAuth mode: persist credentials in the host so refreshes survive container restarts
+      - ./client_secret.json:/app/client_secret.json:ro
+      - ./token.json:/app/token.json
+    restart: unless-stopped
 
   poller:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     env_file: .env
     environment:
-      - RUN_ROLE=poller            # ↙︎ index.js מפעיל linkPoller
+      - RUN_ROLE=poller
       - REDIS_HOST=redis
       - REDIS_PASS=${REDIS_PASS}
+      - LOG_TZ=Asia/Jerusalem
+      - DEBUG_LEVEL=${DEBUG_LEVEL:-2}
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - ./client_secret.json:/app/client_secret.json:ro
+      - ./token.json:/app/token.json
+    restart: unless-stopped
+
+  # --- NGROK sidecar: exposes the webhook to the internet ---
+  ngrok:
+    image: ngrok/ngrok:latest
+    env_file: .env
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}   # Your ngrok account token
+      - TZ=Asia/Jerusalem                    # Container logs timezone (optional)
+    # Forward to the *service name* "webhook" on the internal Docker network
+    command: >
+      http --domain=${NGROK_DOMAIN}
+           --region=${NGROK_REGION:-eu}
+           --log=stdout
+           --log-format=logfmt
+           webhook:8197
+    depends_on:
+      webhook:
+        condition: service_started
+    # Optional: expose local ngrok inspector (http://localhost:4040)
+    ports:
+      - "4040:4040"
+    restart: unless-stopped
 
 volumes:
   redis-data:

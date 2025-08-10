@@ -5,12 +5,12 @@ import { google } from 'googleapis';
 const creds  = JSON.parse(await fs.readFile('client_secret.json'));
 const token  = JSON.parse(await fs.readFile('token.json'));
 
-const { client_id, client_secret } = creds.installed;
+const { client_id, client_secret, redirect_uris } = creds.installed;
 
 export const oAuth2 = new google.auth.OAuth2(
   client_id,
   client_secret,
-  'urn:ietf:wg:oauth:2.0:oob'   // redirect URI של desktop
+  redirect_uris[0]  // redirect URI של desktop
 );
 oAuth2.setCredentials(token);
 
