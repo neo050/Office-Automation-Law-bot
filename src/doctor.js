@@ -6,7 +6,7 @@ import 'dotenv/config';
 import cfg            from './config.js';
 import { checkAll }   from './diagnostics.js';
 
-cfg.load();
+await cfg.load();
 
 const ICON = { ok: '✅', fail: '❌', skip: '⚪' };
 

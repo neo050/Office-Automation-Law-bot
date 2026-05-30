@@ -76,9 +76,9 @@ export function mountAdmin(app) {
   api.get('/config', (_req, res) =>
     res.json({ ok: true, settings: cfg.all() }));
 
-  api.put('/config', (req, res) => {
+  api.put('/config', async (req, res) => {
     const updates = req.body && typeof req.body === 'object' ? req.body : {};
-    const { applied, requiresRestart } = cfg.update(updates);
+    const { applied, requiresRestart } = await cfg.update(updates);
     log.info('adminServer', 'config_updated', { applied });
     res.json({ ok: true, applied, requiresRestart, settings: cfg.all() });
   });

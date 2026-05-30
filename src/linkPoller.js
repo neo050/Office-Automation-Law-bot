@@ -14,6 +14,7 @@ import {
   saveChatBundleUpdate
 } from './functionsImpl.js';
 import { buildLogFromRedis } from './chatHistory.js';
+import cfg from './config.js';
 import { log } from './logger.js';
 
 /* ───────── Config ───────── */
@@ -23,6 +24,11 @@ let   stopping   = false;
 /* ───────── Worker Tick ───────── */
 async function tick () {
   if (stopping) return;
+
+  // Refresh shared config from Redis so settings edited in the dashboard
+  // (request-time keys) propagate to this worker without a redeploy.
+  await cfg.load();
+
   const now = Date.now();
 
   let rows;

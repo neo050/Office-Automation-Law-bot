@@ -2,18 +2,23 @@
 //  src/config.js  ·  Central configuration (single source of truth)
 // ────────────────────────────────────────────────────────────────
 //  Layered resolution (highest wins):
-//    1. runtime overrides file  (config/runtime.json – editable from UI)
+//    1. runtime overrides  (stored in Redis – editable from the UI, SHARED
+//       across every service: webhook, poller, …)
 //    2. process.env
 //    3. schema default
 //
-//  load()   – read the overrides file and mirror it into process.env so
+//  load()   – read overrides from Redis and mirror them into process.env so
 //             modules that read process.env at import time still see them.
-//  get()    – resolve a single key through the layers.
+//  get()    – resolve a single key through the layers (synchronous, hot path).
 //  all()    – schema + current values (secrets masked) for the settings UI.
-//  update() – validate, persist to the overrides file, apply to process.env.
+//  update() – validate, apply to process.env, persist to Redis (shared).
+//
+//  Why Redis (not a file): on a cloud host the filesystem is ephemeral and
+//  per-instance, so a file can't be shared between the webhook and poller and
+//  doesn't survive redeploys. A Redis hash is durable (volume-backed) and a
+//  single source of truth that every service reads.
 // ────────────────────────────────────────────────────────────────
-import fs   from 'node:fs';
-import path from 'node:path';
+import redis from './redis.js';
 
 export const MASK = '••••••••';
 
@@ -58,24 +63,28 @@ export const SCHEMA = [
   { key:'HISTORY_WINDOW',            group:'App',      label:'GPT History Window', default:'40' }
 ];
 
-const KEY_SET      = new Set(SCHEMA.map(s => s.key));
-const RUNTIME_FILE = process.env.RUNTIME_CONFIG_FILE || path.join('config', 'runtime.json');
+const KEY_SET = new Set(SCHEMA.map(s => s.key));
+// Namespaced so staging/prod don't collide; every service uses the same key.
+const NS      = process.env.REDIS_NS ? `${process.env.REDIS_NS}:` : '';
+const CFG_KEY = `${NS}cfg:overrides`;
 
-let overrides = {};   // key → string (from runtime file + live updates)
+let overrides = {};   // key → string (loaded from Redis + live updates)
 
-/** Read the overrides file (if any) and mirror values into process.env. */
-export function load() {
+/** Read the overrides hash from Redis and mirror values into process.env. */
+export async function load() {
   try {
-    const raw = fs.readFileSync(RUNTIME_FILE, 'utf8');
-    const obj = JSON.parse(raw);
+    const obj = await redis.hgetall(CFG_KEY);   // {} when the hash is absent
     overrides = {};
-    for (const [k, v] of Object.entries(obj)) {
+    for (const [k, v] of Object.entries(obj || {})) {
       if (!KEY_SET.has(k)) continue;
       const val = v == null ? '' : String(v);
       overrides[k] = val;
       if (val !== '') process.env[k] = val;
     }
-  } catch {/* no file yet – fine */}
+  } catch (e) {
+    // Don't crash boot if Redis is briefly unavailable — env + defaults still apply.
+    console.warn('[config] could not load overrides from Redis:', e.message);
+  }
   return overrides;
 }
 
@@ -114,10 +123,13 @@ export function all({ reveal = false } = {}) {
 }
 
 /**
- * Validate + persist updates. Unknown keys and untouched masked secrets
- * are ignored. Returns the keys that were actually applied.
+ * Validate + persist updates. Unknown keys and untouched masked secrets are
+ * ignored. The in-memory + process.env mutation happens synchronously (before
+ * the first await), so callers that only need the live effect may skip awaiting;
+ * await to be sure the change is durably written to Redis.
+ * Returns the keys that were actually applied.
  */
-export function update(updates = {}) {
+export async function update(updates = {}) {
   const applied = [];
   let restart   = false;
   for (const [k, raw] of Object.entries(updates)) {
@@ -130,17 +142,22 @@ export function update(updates = {}) {
     applied.push(k);
     if (SCHEMA.find(s => s.key === k)?.requiresRestart) restart = true;
   }
-  if (applied.length) persist();
+  if (applied.length) await persist();
   return { applied, requiresRestart: restart };
 }
 
-function persist() {
-  const dir = path.dirname(RUNTIME_FILE);
-  fs.mkdirSync(dir, { recursive: true });
-  // Only keep non-empty overrides in the file.
+async function persist() {
+  // Only keep non-empty overrides; rebuild the hash so cleared keys disappear.
   const clean = {};
   for (const [k, v] of Object.entries(overrides)) if (v !== '') clean[k] = v;
-  fs.writeFileSync(RUNTIME_FILE, JSON.stringify(clean, null, 2));
+  try {
+    const multi = redis.multi();
+    multi.del(CFG_KEY);
+    if (Object.keys(clean).length) multi.hset(CFG_KEY, clean);
+    await multi.exec();
+  } catch (e) {
+    console.warn('[config] could not persist overrides to Redis:', e.message);
+  }
 }
 
 export default { SCHEMA, MASK, load, get, isSet, all, update };
