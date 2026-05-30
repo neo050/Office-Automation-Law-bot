@@ -2,7 +2,8 @@
 //  src/agentLoop.js   ·   GPT worker  (v2025-08-08, prod-ready)
 // ────────────────────────────────────────────────────────────────
 import fs            from 'node:fs';
-import { OpenAI }    from 'openai';
+import cfg           from './config.js';
+import { openai }    from './openaiClient.js';
 import redis         from './redis.js';
 import fns           from './functionsImpl.js';
 import { findClientByPhone } from './clientLookup.js';   // ⬅︎ NEW
@@ -33,11 +34,8 @@ const {
 /* ───────── new globals ───────── */
 const REDIS_TTL_SEC = 60 * 60 * 24 * 30;   // 30 d
 const TMP_TTL_SEC   = 60 * 10;             // 10 min
-const MAX_TOOL_TURNS = Number(process.env.MAX_TOOL_TURNS) || 8; // GPT loop guard
-const HISTORY_WINDOW = Number(process.env.HISTORY_WINDOW) || 40; // msgs kept (excl. system)
-
-/* ─────────────── OpenAI ─────────────── */
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const maxToolTurns  = () => Number(cfg.get('MAX_TOOL_TURNS'))  || 8;  // GPT loop guard
+const historyWindow = () => Number(cfg.get('HISTORY_WINDOW')) || 40;  // msgs kept (excl. system)
 
 /* ─────────────── Helper: retry w/ back-off ─────────────── */
 async function sendWhatsAppSafe (args) {
@@ -88,11 +86,12 @@ async function setClientState (phone, state, ttl = REDIS_TTL_SEC) {
 /* Keep the GPT context bounded: system prompt + last N turns.
    Orphaned tool frames left by the cut are healed by repairHistory(). */
 function windowHistory (history) {
-  if (history.length <= HISTORY_WINDOW + 1) return history;
+  const win = historyWindow();
+  if (history.length <= win + 1) return history;
   const hasSystem = history[0]?.role === 'system';
   const system    = hasSystem ? [history[0]] : [];
   const rest      = hasSystem ? history.slice(1) : history;
-  return [...system, ...rest.slice(-HISTORY_WINDOW)];
+  return [...system, ...rest.slice(-win)];
 }
 
 /* ───────────────────────── Main handler ───────────────────────── */
@@ -218,7 +217,7 @@ export async function agentHandle (waMsg) {
 
   let turns = 0;
   while (true) {
-    if (++turns > MAX_TOOL_TURNS) {
+    if (++turns > maxToolTurns()) {
       log.error('agentHandle', 'max_tool_turns_exceeded', { phone: derivedPhone, turns });
       await sendWhatsAppSafe({ to: derivedPhone, text: FALLBACK_MSG });
       history.push({ role:'assistant', content: FALLBACK_MSG });
@@ -230,8 +229,8 @@ export async function agentHandle (waMsg) {
 
     let oa;
     try {
-      oa = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+      oa = await openai().chat.completions.create({
+        model: cfg.get('OPENAI_MODEL'),
         messages,
         tools: TOOLS,
         tool_choice: 'auto'

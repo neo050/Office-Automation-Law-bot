@@ -21,6 +21,8 @@ import {
   markRead
 } from './conversationStore.js';
 import { sendWhatsApp } from './functionsImpl.js';
+import cfg              from './config.js';
+import { checkAll }     from './diagnostics.js';
 import { log }          from './logger.js';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +65,23 @@ export function mountAdmin(app) {
   api.use(basicAuth);
 
   api.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+  // Deep health check of every external service (Redis/WhatsApp/OpenAI/Google).
+  api.get('/health/services', async (_req, res) => {
+    try { res.json({ ok: true, ...(await checkAll()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // ── Runtime configuration (settings UI) ──
+  api.get('/config', (_req, res) =>
+    res.json({ ok: true, settings: cfg.all() }));
+
+  api.put('/config', (req, res) => {
+    const updates = req.body && typeof req.body === 'object' ? req.body : {};
+    const { applied, requiresRestart } = cfg.update(updates);
+    log.info('adminServer', 'config_updated', { applied });
+    res.json({ ok: true, applied, requiresRestart, settings: cfg.all() });
+  });
 
   api.get('/conversations', async (req, res) => {
     const limit = asInt(req.query.limit, 200);

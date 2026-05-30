@@ -8,7 +8,8 @@ import { drive }                    from './gAuth.js';
 import redis                        from './redis.js';
 import axios                        from 'axios';
 import dayjs                        from 'dayjs';
-import { OpenAI }                   from 'openai';
+import cfg                          from './config.js';
+import { openai }                   from './openaiClient.js';
 import { log }                      from './logger.js';
 import { ensureFolder }             from './driveUtils.js';
 import { saveMedia as saveWhatsApp } from './media.js';
@@ -19,9 +20,9 @@ import {
 import { PHONE_RE, NAME_RE }        from './validators.js';
 import { recordMessage }           from './conversationStore.js';
 
-// ─────────────────────  OpenAI init  ─────────────────────
-const openai        = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const SUMMARY_MODEL = process.env.SUMMARY_MODEL || 'gpt-4o-mini';
+// ─────────────────────  OpenAI (lazy, config-driven)  ─────────────────────
+// `openai()` and SUMMARY_MODEL are resolved at call time so UI config edits
+// (key / model) take effect without a restart.
 
 // ─────────────────────  1. lookupClient  ─────────────────────
 export async function lookupClient({ id, fullName = '', phone = '' }) {
@@ -113,9 +114,10 @@ export async function saveMedia({ folderId, mediaId, mediaType }) {
 export async function sendWhatsApp({ to, text = null, templateName = null }) {
   log.step('functions.sendWhatsApp', 'start', { to, templateName });
 
-  const TOKEN         = process.env.PERMANENT_WABA_TOKEN;
-  const PHONE_ID      = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v23.0';
+  const TOKEN         = cfg.get('PERMANENT_WABA_TOKEN');
+  const PHONE_ID      = cfg.get('WHATSAPP_PHONE_NUMBER_ID');
+  const GRAPH_VERSION = cfg.get('GRAPH_VERSION');
+  const GRAPH_BASE    = cfg.get('GRAPH_BASE');
 
   const body = templateName
     ? {
@@ -133,7 +135,7 @@ export async function sendWhatsApp({ to, text = null, templateName = null }) {
 
   try {
     await axios.post(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`,
+      `${GRAPH_BASE}/${GRAPH_VERSION}/${PHONE_ID}/messages`,
       body,
       {
         headers: {
@@ -164,8 +166,8 @@ export async function summarizeTranscript(transcript) {
   log.step('functions.summarizeTranscript', 'start');
 
   try {
-    const { choices } = await openai.chat.completions.create({
-      model       : SUMMARY_MODEL,
+    const { choices } = await openai().chat.completions.create({
+      model       : cfg.get('SUMMARY_MODEL'),
       temperature : 0.3,
       max_tokens  : 400,
       messages    : [

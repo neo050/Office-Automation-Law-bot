@@ -6,6 +6,7 @@
 import axios                     from 'axios';
 import { drive }                 from './gAuth.js';   // ✱ auth כבר מטופל שם
 import { driveOpts }             from './driveUtils.js';
+import cfg                       from './config.js';
 import { log }                   from './logger.js';
 
 /**  Map helpers  */
@@ -27,13 +28,14 @@ export async function saveMedia (msg, token, parentId) {
   const kind = msg?.type;
   if (!kind || !msg[kind]?.id) throw new Error('invalid_whatsapp_media_payload');
   const mediaId       = msg[kind].id;
-  const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v23.0';
+  const GRAPH_VERSION = cfg.get('GRAPH_VERSION');
+  const GRAPH_BASE    = cfg.get('GRAPH_BASE');
 
   /* ───── 2. קריאה ראשונה – מטא-דאטה ───── */
   let meta;
   try {
     const { data } = await axios.get(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${mediaId}`,
+      `${GRAPH_BASE}/${GRAPH_VERSION}/${mediaId}`,
       { headers:{ Authorization:`Bearer ${token}` }, timeout:5_000 }
     );
     meta = data;                                         // { url, mime_type, … }

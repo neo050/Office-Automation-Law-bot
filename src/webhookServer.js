@@ -7,6 +7,7 @@ import express from 'express';
 import crypto  from 'node:crypto';
 import { agentHandle } from './agentLoop.js';
 import { mountAdmin }  from './adminServer.js';
+import cfg from './config.js';
 import { log } from './logger.js';
 
 const app = express();
@@ -16,9 +17,9 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; }
 }));
 
-/* ───────── Webhook signature verification (env-gated) ───────── */
-const APP_SECRET = process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET;
+/* ───────── Webhook signature verification (config-gated) ───────── */
 function verifySignature(req) {
+  const APP_SECRET = cfg.get('WHATSAPP_APP_SECRET');
   if (!APP_SECRET) return true;                       // not configured → skip (dev)
   const sig = req.get('x-hub-signature-256') || '';
   const expected = 'sha256=' + crypto
@@ -33,7 +34,7 @@ function verifySignature(req) {
 }
 
 app.get('/webhook', (req, res) => {
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+  const verifyToken = cfg.get('WHATSAPP_VERIFY_TOKEN');
   const ok = req.query['hub.mode'] === 'subscribe' &&
             req.query['hub.verify_token'] === verifyToken;
   if (ok) return res.status(200).send(req.query['hub.challenge']);
@@ -61,7 +62,7 @@ app.post('/webhook', async (req, res) => {
     const statuses = value?.statuses;             // delivered / read / failed
 
     /* ② Echo & Status filtering */
-    const MY_WABA = process.env.WHATSAPP_BUSINESS_NUMBER; // "972797290682"
+    const MY_WABA = cfg.get('WHATSAPP_BUSINESS_NUMBER'); // "972797290682"
 
     if (message?.from === MY_WABA) {
       log.debug('webhook', 'echo_skip', { from: message.from });
@@ -94,7 +95,7 @@ app.post('/webhook', async (req, res) => {
 /* ───────── Operator dashboard (UI + REST API) ───────── */
 mountAdmin(app);
 
-const PORT = process.env.PORT || 8197;
+const PORT = cfg.get('PORT') || 8197;
 app.listen(PORT, () => console.log('✅ Webhook + dashboard listening on', PORT, '· UI: /admin'));
 
 process.on('unhandledRejection', err => { console.error('[webhook] unhandledRejection', err); });
