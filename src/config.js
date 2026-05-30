@@ -39,6 +39,8 @@ export const SCHEMA = [
   { key:'SHEET_NAME',                group:'Google',   label:'Sheet Tab Name',            default:'Clients' },
   { key:'DRIVE_ROOT_ID',             group:'Google',   label:'Drive Root Folder ID' },
   { key:'DRIVE_MODE',                group:'Google',   label:'Drive Mode (empty / shared)' },
+  { key:'GOOGLE_CLIENT_SECRET_JSON', group:'Google',   label:'OAuth client_secret.json (JSON or base64)', secret:true, requiresRestart:true },
+  { key:'GOOGLE_TOKEN_JSON',         group:'Google',   label:'OAuth token.json (JSON or base64)',         secret:true, requiresRestart:true },
 
   // ── Redis ──
   { key:'REDIS_HOST',                group:'Redis',    label:'Redis Host',  default:'127.0.0.1', requiresRestart:true },
