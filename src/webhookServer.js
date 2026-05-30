@@ -1,15 +1,36 @@
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  src/webhookServer.js  – HTTP only
+//  src/webhookServer.js  – HTTP only (webhook + operator dashboard)
 // ─────────────────────────────────────────────────────────────────────────────
 import 'dotenv/config';
 import express from 'express';
+import crypto  from 'node:crypto';
 import { agentHandle } from './agentLoop.js';
-import { queueInboundMedia } from './linkScheduler.js';
+import { mountAdmin }  from './adminServer.js';
 import { log } from './logger.js';
 
 const app = express();
-app.use(express.json({ limit:'2mb' }));
+// Capture the raw body so we can verify Meta's X-Hub-Signature-256 HMAC.
+app.use(express.json({
+  limit : '2mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; }
+}));
+
+/* ───────── Webhook signature verification (env-gated) ───────── */
+const APP_SECRET = process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET;
+function verifySignature(req) {
+  if (!APP_SECRET) return true;                       // not configured → skip (dev)
+  const sig = req.get('x-hub-signature-256') || '';
+  const expected = 'sha256=' + crypto
+    .createHmac('sha256', APP_SECRET)
+    .update(req.rawBody || Buffer.alloc(0))
+    .digest('hex');
+  try {
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch { return false; }
+}
 
 app.get('/webhook', (req, res) => {
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
@@ -26,6 +47,12 @@ const DROP_TYPES = ['unsupported', 'reaction', 'location'];
 // ───────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   const t0 = Date.now();                                           // מטריצת זמן לבנצ'מרק
+
+  /* ⓪ Authenticate the payload before trusting any of it */
+  if (!verifySignature(req)) {
+    log.error('webhook', 'bad_signature', { ip: req.ip });
+    return res.sendStatus(403);
+  }
 
   try {
     /* ① חילוץ הערך הרלוונטי מה-payload */
@@ -49,11 +76,8 @@ app.post('/webhook', async (req, res) => {
         log.info('webhook', 'drop_placeholder', { from: message.from, type: message.type });
         return res.sendStatus(200);          // ✨ לא נכנס ל-agentLoop
     }
-    /* ③ עיבוד הודעה אמיתית */
+    /* ③ עיבוד הודעה אמיתית – agentHandle כבר אחראי על queueInboundMedia */
     if (message) {
-      log.step('webhook', 'queueInboundMedia.start', { from: message.from, type: message.type });
-      await queueInboundMedia(message);
-
       log.step('webhook', 'agentHandle.start', { from: message.from, type: message.type });
       await agentHandle(message);
     }
@@ -67,7 +91,10 @@ app.post('/webhook', async (req, res) => {
   log.info('webhook', 'done', { ms: Date.now() - t0 });
 });
 
+/* ───────── Operator dashboard (UI + REST API) ───────── */
+mountAdmin(app);
+
 const PORT = process.env.PORT || 8197;
-app.listen(PORT, () => console.log('✅ Webhook server listening on', PORT));
+app.listen(PORT, () => console.log('✅ Webhook + dashboard listening on', PORT, '· UI: /admin'));
 
 process.on('unhandledRejection', err => { console.error('[webhook] unhandledRejection', err); });

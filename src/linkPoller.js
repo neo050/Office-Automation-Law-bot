@@ -5,6 +5,7 @@ import 'dotenv/config';
 import {
   getDuePhones,
   consumePhone,
+  claimSummarySlot,
   quitRedis
 } from './linkScheduler.js';
 import {
@@ -50,16 +51,19 @@ async function tick () {
     log.step('linkPoller', 'process.start', { phone });
 
     try {
-      /* build RAW transcript */
-      const raw = await buildLogFromRedis(`conv:${phone}`);
+      /* Summarise + persist only if no other worker just did it for
+         this folder (avoids duplicate "### timestamp" blocks). */
+      if (await claimSummarySlot(folderId)) {
+        const raw = await buildLogFromRedis(`conv:${phone}`);
 
-      /* GPT summary */
-      const { ok: sumOK, summary, error: sumErr } = await summarizeTranscript(raw);
-      if (!sumOK) log.error('linkPoller', 'summary_failed', { phone, err: sumErr });
+        const { ok: sumOK, summary, error: sumErr } = await summarizeTranscript(raw);
+        if (!sumOK) log.error('linkPoller', 'summary_failed', { phone, err: sumErr });
 
-      /* append / update bundle */
-      const r = await saveChatBundleUpdate({ folderId, raw, summary: summary || '' });
-      if (!r.ok) log.error('linkPoller', 'saveBundle_failed', { phone, err: r.error });
+        const r = await saveChatBundleUpdate({ folderId, raw, summary: summary || '' });
+        if (!r.ok) log.error('linkPoller', 'saveBundle_failed', { phone, err: r.error });
+      } else {
+        log.info('linkPoller', 'skip_recent_summary', { phone, folderId });
+      }
 
       /* send Drive link */
       const link = `https://drive.google.com/drive/folders/${folderId}`;
