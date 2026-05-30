@@ -33,7 +33,7 @@ flowchart TD
     SET["/admin/settings.html"]:::ui --> API
     API -->|conversations| CS["conversationStore<br/>chatlog/chatmeta/index"]:::redis
     API -->|reply| M
-    API -->|config| CFG["config.js<br/>runtime.json overrides"]:::cfg
+    API -->|config| CFG["config.js<br/>Redis overrides (shared)"]:::cfg
     API -->|health| DIAG["diagnostics<br/>Redis/WhatsApp/OpenAI/Google"]:::diag
   end
 

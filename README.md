@@ -118,7 +118,7 @@ docker compose up -d --build   # webhook + poller + redis + ngrok sidecar
 
 All settings resolve through one layered source of truth (`src/config.js`):
 
-> **runtime overrides** (`config/runtime.json`, editable from the UI) → **`process.env`** → **schema default**
+> **runtime overrides** (stored in **Redis**, editable from the UI, shared across every service) → **`process.env`** → **schema default**
 
 Request‑time values (WhatsApp token, OpenAI key/model, Graph version, Sheet/Drive IDs) take effect **live** after a UI edit; infrastructure keys are flagged *“requires restart.”*
 
@@ -149,7 +149,7 @@ Request‑time values (WhatsApp token, OpenAI key/model, Graph version, Sheet/Dr
 | `MAX_TOOL_TURNS` | App | Safety cap on the GPT tool‑call loop per message | `8` |
 | `HISTORY_WINDOW` | App | Max chat‑history messages kept in the GPT context | `40` |
 | `CHAT_LOG_MAX` / `CHAT_LOG_TTL_SEC` | App | Dashboard message buffer size / retention | `1000` / `5184000` |
-| `RUNTIME_CONFIG_FILE` | — | Path to UI overrides file | `config/runtime.json` |
+| _(UI overrides)_ | — | Persisted in a Redis hash `{REDIS_NS}:cfg:overrides`, shared across services | — |
 | `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` / `NGROK_REGION` | Infra | ngrok sidecar tunnel | — |
 
 > **Google auth:** this build uses **OAuth 2.0 installed‑app** credentials. Place `client_secret.json` and a generated `token.json` at the project root (Docker mounts both into the container). Generate the token once with `node src/token.js` or `node quickstart.js` and authorise the Drive + Sheets scopes. All four credential files are git‑ignored.
@@ -174,7 +174,7 @@ REST API (same auth): `GET /api/conversations`, `GET /api/conversations/:phone`,
 The dashboard's ⚙️ button opens **`/admin/settings.html`** — a single screen to configure the system and verify every integration without touching the shell.
 
 - **Edit configuration in the browser:** every setting (grouped by WhatsApp / OpenAI / Google / Redis / App) is editable. Secrets are masked (`••••`) and never sent back to the client; submitting an unchanged mask leaves the secret intact.
-- **Live persistence:** edits persist to `config/runtime.json` and mirror into `process.env`, taking effect live for request‑time values. Infra keys are flagged *“requires restart.”*
+- **Live persistence:** edits persist to **Redis** (a shared hash, read by every service) and mirror into `process.env`, taking effect live for request‑time values; the poller reloads each tick so changes propagate without a redeploy. Infra keys are flagged *“requires restart.”*
 - **Live health panel:** a status lamp per service (Redis / WhatsApp / OpenAI / Google) with latency and detail, backed by `GET /api/health/services`.
 
 Config REST API (same auth): `GET /api/config`, `PUT /api/config`, `GET /api/health/services`.

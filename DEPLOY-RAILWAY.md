@@ -20,20 +20,20 @@
 | דשבורד מפעיל | `https://office-automation-law-bot-production.up.railway.app/admin` |
 | הגדרות + בריאות | `https://office-automation-law-bot-production.up.railway.app/admin/settings.html` |
 | Railway project | `serene-manifestation` (workspace: neoray hagag's Projects) |
-| שירותים | `Office-Automation-Law-bot` (webhook) · `Redis` |
-| דיסק קבוע | volume על `/app/data` → `RUNTIME_CONFIG_FILE=/app/data/runtime.json` |
+| שירותים | `Office-Automation-Law-bot` (webhook) · `poller` · `Redis` |
+| תצורה משותפת | נשמרת ב-**Redis** (hash `prod:cfg:overrides`) — מקור-אמת אחד לכל השירותים |
 | תוכנית | trial (לשדרג ל-Hobby ל-always-on אמיתי) |
 
-### 🔧 הגדרה דרך ה-UI (קבוע, נוח, מודולרי)
-בזכות ה-volume על `/app/data`, **כל ההגדרות שתשמור במסך `/admin/settings.html` נשמרות לתמיד** (שורדות redeploy). זה מקור-האמת הנוח:
+### 🔧 הגדרה דרך ה-UI (קבוע, נוח, מודולרי, משותף)
+התצורה נשמרת ב-**Redis** (לא בקובץ), כך ש**כל מה שתשמור במסך `/admin/settings.html` נשמר לתמיד ומשותף לכל השירותים** (webhook + poller). עריכה ב-UI מתעדכנת ל-poller תוך ~10 שניות. זה מקור-האמת הנוח:
 - כל פרמטר (WhatsApp / OpenAI / Google / App) ניתן לעריכה שם, מקובץ לפי שירות.
 - **גם Google OAuth מלא** — שדות `client_secret.json` ו-`token.json` (הדבק JSON או base64). מסומנים "דורש הפעלה מחדש".
 - ערכים סודיים ממוסכים (`••••`); השארת המסכה לא משנה אותם.
-- שכבות התצורה: **UI (`/app/data/runtime.json`) → Railway Variables (env) → ברירת מחדל**. כלומר אפשר גם env וגם UI; ה-UI גובר.
+- שכבות התצורה: **UI (Redis) → Railway Variables (env) → ברירת מחדל**. ה-UI גובר.
 
-> **אבטחה:** הדשבורד מוגן ב-Basic auth. משתמש: `admin`. הסיסמה הראשונית הוגדרה כמשתנה זמני — **שנה אותה מיד** במסך ההגדרות (שדה `ADMIN_PASS`), והיא תישמר ב-volume.
+> **אבטחה:** הדשבורד מוגן ב-Basic auth. משתמש: `admin`. הסיסמה הראשונית הוגדרה כמשתנה זמני — **שנה אותה מיד** במסך ההגדרות (שדה `ADMIN_PASS`), והיא תישמר ב-Redis.
 
-> **תזכורת:** מפתחות תשתית בלבד (`REDIS_URL`, `PORT`, `RUNTIME_CONFIG_FILE`) נשארים ב-Railway Variables — לא ב-UI.
+> **תזכורת:** מפתחות תשתית בלבד (`REDIS_URL`, `REDIS_NS`, `PORT`, `RUN_ROLE`) נשארים ב-Railway Variables — לא ב-UI. ה-volume שב-`/app/data` כבר לא נחוץ (התצורה עברה ל-Redis) וניתן להסירו.
 
 ---
 
