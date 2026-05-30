@@ -1,39 +1,54 @@
 flowchart TD
   A["Meta Webhook<br/>POST /webhook"] -->|1. message| B[webhookServer]
 
-  subgraph "Webhook Layer"
-    B --> C{"סינון ראשוני<br/>statuses / placeholders"}
+  subgraph "Webhook Layer (role=webhook)"
+    B --> SIG{"verify X-Hub-Signature-256<br/>(config-gated)"}
+    SIG -->|bad| X403["403"]
+    SIG -->|ok| C{"סינון ראשוני<br/>echo / statuses / placeholders"}
     C -->|skip| X["200 OK ← Meta"]
-    C -->|message| D[queueInboundMedia]:::redis
     C -->|message| E[agentHandle]:::agent
   end
 
-  subgraph "GPT Agent"
+  subgraph "GPT Agent (bounded loop)"
+    E --> REC1["recordMessage IN<br/>(conversationStore)"]:::ui
+    E --> Q0[queueInboundMedia]:::redis
     E --> F[Redis GET convo]
-    F --> G[add user msg +<br/>ensureSystemPrompt]
-    G --> H([OpenAI chat<br/>+ tool selection]):::openai
-    H -->|tool_calls| I{Router}
+    F --> WIN["windowHistory +<br/>ensureSystemPrompt"]
+    WIN --> H([OpenAI chat<br/>+ tool selection]):::openai
+    H -->|tool_calls| I{Router · max MAX_TOOL_TURNS}
     I -->|lookupClient| J["Google Sheet<br/>upsertClientRow"]:::gs
-    I -->|createFolder| K["Drive ensureFolder"]:::drive
+    I -->|createFolder| K["Drive ensureFolder<br/>+ setMeta folderId"]:::drive
     I -->|saveMedia| L["saveWhatsApp + Drive upload"]:::drive
-    I -->|sendWhatsApp| M["send via Graph API"]:::wa
-    I -->|scheduleFolderLink| N["Redis Z_DUE<br/>& H_DIR"]:::redis
-    I -->|saveChatBundleUpdate| O["Drive chat.txt + summary.txt"]:::drive
+    I -->|sendWhatsApp| M["send via Graph API<br/>+ recordMessage OUT"]:::wa
+    I -->|scheduleFolderLink| N["Redis Z_DUE & H_DIR"]:::redis
     I --> P["tool replies → history"]
     P -->|loop| H
     H -->|assistant text| M
     M --> Q["Redis SET convo<br/>+ idleBump"]
+    Q -.->|6 min idle| ID["idleManager<br/>claimSummarySlot"]:::agent
   end
 
-  subgraph "Background services"
-    N ==>|due link| R["linkPoller (infinite loop)"]
-    R -->|getDuePhones| S["Redis Z_DUE"]:::redis
-    R -->|consumePhone| T["Redis H_DIR & Z_DUE"]:::redis
-    R --> U["buildLogFromRedis"]:::redis
-    U --> V["summarizeTranscript (OpenAI)"]:::openai
-    V --> W["saveChatBundleUpdate"]:::drive
-    W --> X1["sendWhatsApp - Drive link"]:::wa
+  subgraph "Operator UI (served by webhookServer)"
+    DASH["/admin · chats SPA"]:::ui --> API["REST API (Basic auth)"]:::ui
+    SET["/admin/settings.html"]:::ui --> API
+    API -->|conversations| CS["conversationStore<br/>chatlog/chatmeta/index"]:::redis
+    API -->|reply| M
+    API -->|config| CFG["config.js<br/>runtime.json overrides"]:::cfg
+    API -->|health| DIAG["diagnostics<br/>Redis/WhatsApp/OpenAI/Google"]:::diag
   end
+
+  subgraph "Background services (role=poller)"
+    N ==>|due link| R["linkPoller (interval)"]
+    R -->|consumePhone| T["Redis Z_DUE & H_DIR"]:::redis
+    R --> SLOT{"claimSummarySlot<br/>(dedup vs idleManager)"}:::redis
+    SLOT -->|fresh| U["buildLogFromRedis"]:::redis
+    U --> V["summarizeTranscript (OpenAI)"]:::openai
+    V --> W["saveChatBundleUpdate<br/>lock:bundle:{folderId}"]:::drive
+    R --> X1["sendWhatsApp · Drive link"]:::wa
+    ID --> SLOT
+  end
+
+  CLI["npm run doctor (CLI)"]:::diag --> DIAG
 
   classDef redis fill:#ffd,stroke:#c90
   classDef agent fill:#cdf,stroke:#06f
@@ -41,3 +56,6 @@ flowchart TD
   classDef drive fill:#d0ffd0,stroke:#189a18
   classDef gs fill:#fff0d0,stroke:#e69500
   classDef wa fill:#d0f0ff,stroke:#0094c5
+  classDef ui fill:#f0d0ff,stroke:#9b00c5
+  classDef cfg fill:#ffe0e0,stroke:#c50000
+  classDef diag fill:#d0fff0,stroke:#00a884
