@@ -1,6 +1,11 @@
 // src/index.js
 import 'dotenv/config';
+import cfg from './config.js';
 import { log } from './logger.js';
+
+// Apply runtime overrides (UI-edited settings) into process.env before any
+// service module reads its configuration.
+cfg.load();
 
 const role = process.env.RUN_ROLE || 'webhook';
 log.debug('▶ starting role:', role);

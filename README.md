@@ -113,6 +113,49 @@ docker compose up -d --build
 | `NGROK_AUTHTOKEN` | Your ngrok auth token | `2QH…` |
 | `NGROK_DOMAIN` | **Reserved** ngrok domain | `lawbot.ngrok.app` |
 | `NGROK_REGION` | Tunnel region | `eu` |
+| `WHATSAPP_APP_SECRET` | Meta App secret — enables `X-Hub-Signature-256` webhook verification (recommended) | `a1b2c3…` |
+| `ADMIN_USER` / `ADMIN_PASS` | HTTP Basic credentials guarding the `/admin` dashboard. If unset, dashboard is open (dev only) | `admin` / `strong-pass` |
+| `MAX_TOOL_TURNS` | Safety cap on GPT tool-call loop per message | `8` |
+| `HISTORY_WINDOW` | Max chat-history messages kept in the GPT context | `40` |
+| `CHAT_LOG_MAX` / `CHAT_LOG_TTL_SEC` | Dashboard message buffer size / retention | `1000` / `5184000` |
+
+---
+
+## 🖥️ Operator dashboard — live chats
+
+A built-in web UI exposes every WhatsApp conversation for the legal team — no extra service to deploy.
+
+- **URL:** `https://<your-domain>/admin` (served by the `webhook` container on port `8197`)
+- **What you get:** WhatsApp-style RTL Hebrew interface — conversation list sorted by recency, unread badges, full message thread (inbound + outbound + media markers), the client's Drive folder link, and a **reply box** so an operator can message the client directly (sent through the same WhatsApp Graph API and logged back into the thread).
+- **Storage:** messages are mirrored into Redis (`chatlog:{phone}`, `chatmeta:{phone}`, `chats:index`) independently of the GPT tool-calling history, so the dashboard survives history windowing/compaction.
+- **Auth:** set `ADMIN_USER` + `ADMIN_PASS` for HTTP Basic protection (constant-time compare). Leave unset only for local development.
+
+REST API (same auth): `GET /api/conversations`, `GET /api/conversations/:phone`, `POST /api/conversations/:phone/reply`, `POST /api/conversations/:phone/read`.
+
+---
+
+## ⚙️ Settings UI & service health
+
+The dashboard's ⚙️ button opens **`/admin/settings.html`** — a single screen to configure the system and verify every integration without touching the shell.
+
+- **Edit configuration in the browser:** every setting from the env table (grouped by WhatsApp / OpenAI / Google / Redis / App) is editable. Secrets are masked (`••••`) and never sent back to the client; submitting an unchanged mask leaves the secret intact.
+- **Layered config (`src/config.js`):** runtime overrides → `process.env` → schema default. Edits persist to `config/runtime.json` (git-ignored) and are mirrored into `process.env`, so request-time values (WhatsApp token, OpenAI key/model, Graph version, Sheet/Drive IDs) take effect **live**. Infra keys (Redis host/port, HTTP port) are flagged *“requires restart.”*
+- **Live health panel:** a status lamp per service (Redis / WhatsApp / OpenAI / Google) with latency and detail, backed by `GET /api/health/services`.
+
+Config REST API (same auth): `GET /api/config`, `PUT /api/config`, `GET /api/health/services`.
+
+---
+
+## 🩺 Diagnostics & tests
+
+```bash
+npm run doctor   # check every external service (exit 1 if any fail) — great for CI/healthchecks
+npm test         # full suite: config, validators, history repair, conversation store,
+                 # WhatsApp send (mocked Graph), diagnostics, dashboard API
+```
+
+- **`src/diagnostics.js`** holds the shared checks used by the CLI, the API and the settings UI — one source of truth for “is service X reachable?”.
+- The test suite (Node's built-in `node:test`) mocks the external HTTP boundaries (Graph / OpenAI) via `GRAPH_BASE` / `OPENAI_BASE`, and runs Redis-backed tests against a local server (`pretest` starts one automatically). No real credentials required.
 
 > **Google auth mode:** this build uses a **Service Account** that owns files in *My Drive*. Put `service-account.json` at the project root and set `GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json` (already done in Docker).
 

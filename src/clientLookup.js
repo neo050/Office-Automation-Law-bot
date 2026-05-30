@@ -7,14 +7,15 @@
 // ────────────────────────────────────────────────────────────────
 
 import { sheets }       from './gAuth.js';
+import cfg              from './config.js';
 import { log }          from './logger.js';
 import { folderExists } from './driveUtils.js';
 
-/* ⇢⇢  CONSTANTS  ────────────────────────────────────────────── */
-const SPREADSHEET_ID = process.env.SHEETS_ID;
-const SHEET_NAME     = process.env.SHEET_NAME || 'Clients';
-const RANGE_READ     = `'${SHEET_NAME}'!A1:Z`;   // header + data
-const RANGE_ALL      = `'${SHEET_NAME}'!A:Z`;
+/* ⇢⇢  CONFIG-DRIVEN ACCESSORS (resolved at call time)  ─────────── */
+const ssId      = () => cfg.get('SHEETS_ID');
+const sheetNm   = () => cfg.get('SHEET_NAME');
+const rangeRead = () => `'${sheetNm()}'!A1:Z`;   // header + data
+const rangeAll  = () => `'${sheetNm()}'!A:Z`;
 
 /* ⇢⇢  SMALL HELPERS  ────────────────────────────────────────── */
 function idxByHeader(headerRow, header) {
@@ -34,8 +35,8 @@ export async function findClientByPhone(phone) {
 
   try {
     const { data } = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: RANGE_READ
+      spreadsheetId: ssId(),
+      range: rangeRead()
     });
     const rows = data.values ?? [];
     if (!rows.length) return { ok:false, found:false };
@@ -68,8 +69,8 @@ export async function upsertClientRow({ id, fullName = '', phone = '' }) {
   let rows;
   try {
     const { data } = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: RANGE_READ
+      spreadsheetId: ssId(),
+      range: rangeRead()
     });
     rows = data.values ?? [];
     log.info('upsertClientRow', 'sheetFetched', { rows: rows.length });
@@ -112,8 +113,8 @@ export async function upsertClientRow({ id, fullName = '', phone = '' }) {
           log.info('upsertClientRow', 'folder_missing_in_drive', { folderId });
           folderId = null; // wipe & clear in sheet
           await sheets.spreadsheets.values.update({
-            spreadsheetId: SPREADSHEET_ID,
-            range: `'${SHEET_NAME}'!${String.fromCharCode(65+IDX_FOLDER)}${sheetRowNumber}`,
+            spreadsheetId: ssId(),
+            range: `'${sheetNm()}'!${String.fromCharCode(65+IDX_FOLDER)}${sheetRowNumber}`,
             valueInputOption: 'RAW',
             requestBody: { values: [['']] }
           });
@@ -135,8 +136,8 @@ export async function upsertClientRow({ id, fullName = '', phone = '' }) {
 
       try {
         await sheets.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
-          range: `'${SHEET_NAME}'!A${sheetRowNumber}:Z${sheetRowNumber}`,
+          spreadsheetId: ssId(),
+          range: `'${sheetNm()}'!A${sheetRowNumber}:Z${sheetRowNumber}`,
           valueInputOption: 'RAW',
           requestBody: { values: [updated] }
         });
@@ -161,8 +162,8 @@ export async function upsertClientRow({ id, fullName = '', phone = '' }) {
 
   try {
     const append   = await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: RANGE_ALL,
+      spreadsheetId: ssId(),
+      range: rangeAll(),
       valueInputOption: 'RAW',
       requestBody: { values: [newRow] }
     });
@@ -184,8 +185,8 @@ export async function updateDriveFolderId(rowNumber, folderId) {
   let headers;
   try {
     const { data } = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!1:1`
+      spreadsheetId: ssId(),
+      range: `'${sheetNm()}'!1:1`
     });
     headers = data.values?.[0] || [];
   } catch (err) {
@@ -202,8 +203,8 @@ export async function updateDriveFolderId(rowNumber, folderId) {
   const colLetter = String.fromCharCode(65 + IDX_FOLDER);
   try {
     await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!${colLetter}${rowNumber}`,
+      spreadsheetId: ssId(),
+      range: `'${sheetNm()}'!${colLetter}${rowNumber}`,
       valueInputOption: 'RAW',
       requestBody: { values: [[folderId]] }
     });

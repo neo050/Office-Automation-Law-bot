@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LawBot · הגדרות מערכת</title>
+<style>
+  :root{
+    --bg:#0b141a; --panel:#111b21; --panel-2:#202c33; --line:#2a3942;
+    --accent:#00a884; --txt:#e9edef; --muted:#8696a0; --danger:#f15c6d; --warn:#e9b949;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI",Arial,sans-serif;background:var(--bg);
+    color:var(--txt);min-height:100vh}
+  header{background:var(--panel-2);padding:14px 22px;display:flex;align-items:center;
+    justify-content:space-between;gap:12px;position:sticky;top:0;z-index:5}
+  header h1{font-size:17px;margin:0}
+  header a{color:var(--accent);text-decoration:none;font-size:14px}
+  .wrap{max-width:920px;margin:0 auto;padding:22px}
+  /* health panel */
+  #health{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:12px;margin-bottom:24px}
+  .svc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .svc .top{display:flex;align-items:center;gap:8px;font-weight:600}
+  .svc .lamp{width:11px;height:11px;border-radius:50%;background:var(--muted)}
+  .svc.ok   .lamp{background:var(--accent)}
+  .svc.fail .lamp{background:var(--danger)}
+  .svc.skip .lamp{background:var(--warn)}
+  .svc .detail{font-size:12px;color:var(--muted);margin-top:6px;word-break:break-word}
+  .svc .lat{font-size:11px;color:var(--muted);float:left}
+  /* config groups */
+  .group{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    margin-bottom:18px;overflow:hidden}
+  .group h2{margin:0;padding:12px 16px;background:var(--panel-2);font-size:15px}
+  .field{display:flex;align-items:center;gap:12px;padding:11px 16px;border-top:1px solid var(--line)}
+  .field label{flex:0 0 230px;font-size:14px}
+  .field .key{display:block;font-size:11px;color:var(--muted)}
+  .field input{flex:1;padding:9px 12px;border-radius:8px;border:1px solid var(--line);
+    background:var(--bg);color:var(--txt);outline:none;font-size:14px;font-family:monospace}
+  .field input:focus{border-color:var(--accent)}
+  .tag{font-size:10px;padding:2px 7px;border-radius:6px;background:var(--panel-2);color:var(--warn)}
+  .bar{position:sticky;bottom:0;background:var(--panel-2);padding:14px 22px;
+    display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--line)}
+  button{background:var(--accent);color:#06281f;border:none;border-radius:9px;
+    padding:10px 20px;font-weight:700;cursor:pointer;font-size:14px}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  button:disabled{opacity:.5;cursor:default}
+  #msg{font-size:14px}
+  #msg.ok{color:var(--accent)} #msg.err{color:var(--danger)} #msg.warn{color:var(--warn)}
+</style>
+</head>
+<body>
+  <header>
+    <h1>⚙️ הגדרות מערכת</h1>
+    <a href="/admin">← חזרה לצ׳אטים</a>
+  </header>
+
+  <div class="wrap">
+    <h2 style="font-size:15px;margin:0 0 12px">בריאות שירותים</h2>
+    <div id="health"><div class="svc"><div class="top">טוען…</div></div></div>
+
+    <h2 style="font-size:15px;margin:0 0 12px">משתני תצורה</h2>
+    <form id="cfgForm"><div id="groups"></div></form>
+  </div>
+
+  <div class="bar">
+    <span id="msg"></span>
+    <div>
+      <button type="button" class="ghost" id="testBtn">בדיקת חיבורים</button>
+      <button type="button" id="saveBtn">שמירה</button>
+    </div>
+  </div>
+
+<script>
+const API='/api';
+const $=s=>document.querySelector(s);
+const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let SCHEMA=[];
+
+function msg(text,kind){ const m=$('#msg'); m.textContent=text; m.className=kind||''; }
+
+async function api(path,opts){ const r=await fetch(API+path,opts);
+  if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
+
+/* ── service health ── */
+const ICON={ok:'✅',fail:'❌',skip:'⚪'};
+async function loadHealth(){
+  $('#health').innerHTML='<div class="svc"><div class="top">בודק…</div></div>';
+  try{
+    const { checks } = await api('/health/services');
+    $('#health').innerHTML = checks.map(c=>`
+      <div class="svc ${c.status}">
+        <div class="top"><span class="lamp"></span> ${ICON[c.status]||''} ${esc(c.service)}
+          ${c.latencyMs!=null?`<span class="lat">${c.latencyMs}ms</span>`:''}</div>
+        <div class="detail">${esc(c.detail||'')}</div>
+      </div>`).join('');
+  }catch(e){ $('#health').innerHTML='<div class="svc fail"><div class="top"><span class="lamp"></span> בדיקה נכשלה</div></div>'; }
+}
+
+/* ── config form ── */
+async function loadConfig(){
+  const { settings } = await api('/config');
+  SCHEMA = settings;
+  const groups={};
+  for(const s of settings){ (groups[s.group] ||= []).push(s); }
+  $('#groups').innerHTML = Object.entries(groups).map(([g,items])=>`
+    <div class="group">
+      <h2>${esc(g)}</h2>
+      ${items.map(s=>`
+        <div class="field">
+          <label>${esc(s.label)}
+            <span class="key">${esc(s.key)}${s.requiresRestart?' <span class="tag">דורש הפעלה מחדש</span>':''}</span>
+          </label>
+          <input data-key="${esc(s.key)}" data-secret="${s.secret}"
+                 type="${s.secret?'password':'text'}"
+                 value="${esc(s.value)}"
+                 placeholder="${s.default?('ברירת מחדל: '+esc(s.default)):''}" />
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+async function save(){
+  const updates={};
+  document.querySelectorAll('#groups input').forEach(inp=>{
+    updates[inp.dataset.key] = inp.value;   // masked secrets (••••) are ignored server-side
+  });
+  $('#saveBtn').disabled=true;
+  try{
+    const r = await api('/config',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(updates)});
+    msg(`נשמרו ${r.applied.length} שדות`+(r.requiresRestart?' · חלק מהשינויים דורשים הפעלה מחדש':''),
+        r.requiresRestart?'warn':'ok');
+    await loadConfig();
+    loadHealth();
+  }catch(e){ msg('שמירה נכשלה','err'); }
+  finally{ $('#saveBtn').disabled=false; }
+}
+
+$('#saveBtn').onclick=save;
+$('#testBtn').onclick=()=>{ msg('בודק חיבורים…',''); loadHealth(); };
+loadConfig().catch(()=>msg('טעינת תצורה נכשלה','err'));
+loadHealth();
+</script>
+</body>
+</html>

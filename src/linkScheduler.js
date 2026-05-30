@@ -59,6 +59,17 @@ export async function scheduleFolderLink (phone, folderId) {
   log.step('linkScheduler.scheduleLink', { phone, due, updated }); // updated=1 אם שונתה רשומה
 }
 
+/* ───────── summary de-duplication ─────────
+   linkPoller (≈5 min) and idleManager (≈6 min) can both fire for the same
+   client moments apart, producing duplicate "### timestamp" blocks. Whoever
+   claims the slot first within `windowSec` performs the summarize+save; the
+   other skips the bundle write (but may still send the link). */
+export async function claimSummarySlot (folderId, windowSec = 120) {
+  if (!folderId) return false;
+  const ok = await redis.set(`${NS}sumSlot:${folderId}`, Date.now(), 'NX', 'EX', windowSec);
+  return Boolean(ok);
+}
+
 /* ───────── poller helpers ───────── */
 export async function getDuePhones (now) {
   /* WITHSCORES → [ phone, score, phone, score … ] */

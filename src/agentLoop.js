@@ -2,7 +2,8 @@
 //  src/agentLoop.js   ·   GPT worker  (v2025-08-08, prod-ready)
 // ────────────────────────────────────────────────────────────────
 import fs            from 'node:fs';
-import { OpenAI }    from 'openai';
+import cfg           from './config.js';
+import { openai }    from './openaiClient.js';
 import redis         from './redis.js';
 import fns           from './functionsImpl.js';
 import { findClientByPhone } from './clientLookup.js';   // ⬅︎ NEW
@@ -17,6 +18,7 @@ import {
   scheduleFolderLink
 }                     from './linkScheduler.js';
 import { bump as idleBump }  from './idleManager.js';
+import { recordMessage, setMeta } from './conversationStore.js';
 import { log }        from './logger.js';
 import { PHONE_RE, NAME_RE } from './validators.js';
 
@@ -32,9 +34,8 @@ const {
 /* ───────── new globals ───────── */
 const REDIS_TTL_SEC = 60 * 60 * 24 * 30;   // 30 d
 const TMP_TTL_SEC   = 60 * 10;             // 10 min
-
-/* ─────────────── OpenAI ─────────────── */
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const maxToolTurns  = () => Number(cfg.get('MAX_TOOL_TURNS'))  || 8;  // GPT loop guard
+const historyWindow = () => Number(cfg.get('HISTORY_WINDOW')) || 40;  // msgs kept (excl. system)
 
 /* ─────────────── Helper: retry w/ back-off ─────────────── */
 async function sendWhatsAppSafe (args) {
@@ -82,6 +83,17 @@ async function setClientState (phone, state, ttl = REDIS_TTL_SEC) {
   log.debug('agentHandle', 'client_state_saved', { phone, state });
 }
 
+/* Keep the GPT context bounded: system prompt + last N turns.
+   Orphaned tool frames left by the cut are healed by repairHistory(). */
+function windowHistory (history) {
+  const win = historyWindow();
+  if (history.length <= win + 1) return history;
+  const hasSystem = history[0]?.role === 'system';
+  const system    = hasSystem ? [history[0]] : [];
+  const rest      = hasSystem ? history.slice(1) : history;
+  return [...system, ...rest.slice(-win)];
+}
+
 /* ───────────────────────── Main handler ───────────────────────── */
 export async function agentHandle (waMsg) {
   await queueInboundMedia(waMsg);
@@ -89,6 +101,14 @@ export async function agentHandle (waMsg) {
   const derivedPhone = waMsg.from;                 // E.164 w/o '+'
   const convKey      = `conv:${derivedPhone}`;
   log.step('agentHandle', 'start', { from: derivedPhone, type: waMsg.type });
+
+  /* Persist the inbound message for the operator dashboard (best-effort). */
+  await recordMessage(derivedPhone, {
+    direction: 'in',
+    type     : waMsg.type || 'text',
+    text     : waMsg.text?.body ?? '',
+    mediaId  : waMsg[waMsg.type]?.id ?? null
+  });
 
   /* -------- ①  FSM BOOTSTRAP -------- */
   let cState = await getClientState(derivedPhone);
@@ -110,13 +130,15 @@ export async function agentHandle (waMsg) {
   if (cState.awaitingPhone) {
     const body = waMsg.text?.body?.trim() || '';
     if (/^כן$/i.test(body)) {
-      cState = { phoneConfirmed:true };
+      cState = { ...cState, phoneConfirmed:true };
+      delete cState.awaitingPhone;
       await setClientState(derivedPhone, cState);
       await sendWhatsAppSafe({ to: derivedPhone,
                                text: 'המספר אומת והוזן במערכת. נמשיך בתהליך.' });
       log.info('agentHandle', 'phone_confirmed', { phone: derivedPhone });
     } else if (PHONE_RE.test(body)) {
-      cState = { phoneConfirmed:true, phoneOverride: body };
+      cState = { ...cState, phoneConfirmed:true, phoneOverride: body };
+      delete cState.awaitingPhone;
       await setClientState(derivedPhone, cState);
       await sendWhatsAppSafe({ to: derivedPhone,
                                text: `המספר ${body} נשמר. נמשיך.` });
@@ -132,7 +154,7 @@ export async function agentHandle (waMsg) {
   }
 
   if (!cState.phoneConfirmed) {
-    await setClientState(derivedPhone, { awaitingPhone:true }, TMP_TTL_SEC);
+    await setClientState(derivedPhone, { ...cState, awaitingPhone:true }, TMP_TTL_SEC);
     await sendWhatsAppSafe({
       to  : derivedPhone,
       text: `האם לשמור את מספר ${derivedPhone} כמספר ליצירת קשר? השב/י "כן" או הקלד/י מספר אחר.`
@@ -184,19 +206,31 @@ export async function agentHandle (waMsg) {
 
   const fullNameForSheet = cState.fullName;
 
+  /* keep the dashboard metadata in sync with the FSM */
+  await setMeta(derivedPhone, { name: fullNameForSheet, state: 'active' });
+
   /* -------- ④  GPT FLOW -------- */
   let history = JSON.parse((await redis.get(convKey)) || '[]');
   history     = ensureSystemPrompt(history, SYSTEM_PROMPT);
+  history     = windowHistory(history);
   history.push({ role:'user', content: waMsg.text?.body ?? `[${waMsg.type}]` });
 
+  let turns = 0;
   while (true) {
+    if (++turns > maxToolTurns()) {
+      log.error('agentHandle', 'max_tool_turns_exceeded', { phone: derivedPhone, turns });
+      await sendWhatsAppSafe({ to: derivedPhone, text: FALLBACK_MSG });
+      history.push({ role:'assistant', content: FALLBACK_MSG });
+      break;
+    }
+
     const { history: safe } = repairHistory(history);
     const messages          = sanitizeForOpenAI(safe);
 
     let oa;
     try {
-      oa = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+      oa = await openai().chat.completions.create({
+        model: cfg.get('OPENAI_MODEL'),
         messages,
         tools: TOOLS,
         tool_choice: 'auto'
@@ -234,7 +268,10 @@ export async function agentHandle (waMsg) {
               result = await createFolder({ ...argsIn,
                                             phone   : phoneForSheet,
                                             fullName: fullNameForSheet });
-              if (result.ok) idleBump(derivedPhone, result.folderId);
+              if (result.ok) {
+                idleBump(derivedPhone, result.folderId);
+                await setMeta(derivedPhone, { folderId: result.folderId });
+              }
               break;
 
             case 'saveMedia': {

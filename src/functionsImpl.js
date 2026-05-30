@@ -5,9 +5,11 @@
 // ────────────────────────────────────────────────────────────────
 
 import { drive }                    from './gAuth.js';
+import redis                        from './redis.js';
 import axios                        from 'axios';
 import dayjs                        from 'dayjs';
-import { OpenAI }                   from 'openai';
+import cfg                          from './config.js';
+import { openai }                   from './openaiClient.js';
 import { log }                      from './logger.js';
 import { ensureFolder }             from './driveUtils.js';
 import { saveMedia as saveWhatsApp } from './media.js';
@@ -16,10 +18,11 @@ import {
   updateDriveFolderId
 }                                   from './clientLookup.js';
 import { PHONE_RE, NAME_RE }        from './validators.js';
+import { recordMessage }           from './conversationStore.js';
 
-// ─────────────────────  OpenAI init  ─────────────────────
-const openai        = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const SUMMARY_MODEL = process.env.SUMMARY_MODEL || 'gpt-4o-mini';
+// ─────────────────────  OpenAI (lazy, config-driven)  ─────────────────────
+// `openai()` and SUMMARY_MODEL are resolved at call time so UI config edits
+// (key / model) take effect without a restart.
 
 // ─────────────────────  1. lookupClient  ─────────────────────
 export async function lookupClient({ id, fullName = '', phone = '' }) {
@@ -111,9 +114,10 @@ export async function saveMedia({ folderId, mediaId, mediaType }) {
 export async function sendWhatsApp({ to, text = null, templateName = null }) {
   log.step('functions.sendWhatsApp', 'start', { to, templateName });
 
-  const TOKEN         = process.env.PERMANENT_WABA_TOKEN;
-  const PHONE_ID      = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v23.0';
+  const TOKEN         = cfg.get('PERMANENT_WABA_TOKEN');
+  const PHONE_ID      = cfg.get('WHATSAPP_PHONE_NUMBER_ID');
+  const GRAPH_VERSION = cfg.get('GRAPH_VERSION');
+  const GRAPH_BASE    = cfg.get('GRAPH_BASE');
 
   const body = templateName
     ? {
@@ -131,7 +135,7 @@ export async function sendWhatsApp({ to, text = null, templateName = null }) {
 
   try {
     await axios.post(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`,
+      `${GRAPH_BASE}/${GRAPH_VERSION}/${PHONE_ID}/messages`,
       body,
       {
         headers: {
@@ -141,6 +145,12 @@ export async function sendWhatsApp({ to, text = null, templateName = null }) {
         timeout: 7000
       }
     );
+    // Mirror every outbound message into the conversation store (for the UI).
+    await recordMessage(to, {
+      direction: 'out',
+      type     : templateName ? 'template' : 'text',
+      text     : text ?? `[template:${templateName}]`
+    });
     return { ok: true };
   } catch (e) {
     const fbErr = e.response?.data?.error;
@@ -156,8 +166,8 @@ export async function summarizeTranscript(transcript) {
   log.step('functions.summarizeTranscript', 'start');
 
   try {
-    const { choices } = await openai.chat.completions.create({
-      model       : SUMMARY_MODEL,
+    const { choices } = await openai().chat.completions.create({
+      model       : cfg.get('SUMMARY_MODEL'),
       temperature : 0.3,
       max_tokens  : 400,
       messages    : [
@@ -185,6 +195,28 @@ export async function summarizeTranscript(transcript) {
     log.error('functions.summarizeTranscript', 'failed', e);
     return { ok: false, error: e.message };
   }
+}
+
+/* ─────────────────────  Distributed lock (per Drive folder)  ─────────────────────
+   Both linkPoller and idleManager can fire for the same client. Without a
+   lock their read-modify-write on chat.txt/summary.txt races and silently
+   drops content. Serialize per folder with a short-lived Redis lock. */
+async function withFolderLock(folderId, fn) {
+  const key   = `lock:bundle:${folderId}`;
+  const token = `${process.pid}:${Date.now()}:${Math.random()}`;
+  for (let i = 0; i < 50; i++) {                       // ~10s max wait
+    const acquired = await redis.set(key, token, 'NX', 'PX', 15_000);
+    if (acquired) {
+      try { return await fn(); }
+      finally {
+        try { if (await redis.get(key) === token) await redis.del(key); }
+        catch {/* ignore */}
+      }
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  log.error('saveChatBundleUpdate', 'lock_timeout_proceeding', { folderId });
+  return fn();                                         // best-effort, avoid deadlock
 }
 
 // ─────────────────────  6. Drive append/update  ─────────────────────
@@ -232,10 +264,10 @@ export async function saveChatBundleUpdate({ folderId, raw, summary }) {
   };
 
   try {
-    await Promise.all([
+    await withFolderLock(folderId, () => Promise.all([
       upsert('chat.txt'   , raw     ),
       upsert('summary.txt', summary )
-    ]);
+    ]));
     log.step('functions.saveChatBundleUpdate', 'done');
     return { ok: true };
   } catch (e) {
